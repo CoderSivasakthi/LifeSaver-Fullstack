@@ -33,6 +33,15 @@ db = client[os.environ['DB_NAME']]
 # Create the main app without a prefix
 app = FastAPI()
 
+# Add CORS middleware FIRST (before routes)
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=["http://localhost:3000", "http://localhost:19006", "*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
@@ -214,12 +223,28 @@ async def create_emergency_details(details: EmergencyDetailsCreate):
         details_dict = details.dict()
         emergency_obj = EmergencyDetails(**details_dict)
         
+        # Test MongoDB connection
+        try:
+            await client.admin.command('ping')
+        except Exception as mongo_error:
+            logger.error(f"MongoDB connection error: {mongo_error}")
+            raise HTTPException(
+                status_code=503, 
+                detail="Database connection error. Please ensure MongoDB is running at mongodb://localhost:27017"
+            )
+        
         # Save to MongoDB
         await db.emergency_details.insert_one(emergency_obj.dict())
+        logger.info(f"Created emergency details for: {emergency_obj.name}")
         
         return emergency_obj
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating emergency details: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @api_router.get("/details/{user_id}", response_model=EmergencyDetails)
 async def get_emergency_details(user_id: str):
@@ -289,14 +314,6 @@ async def generate_user_pdf(user_id: str):
 # Include the router in the main app
 app.include_router(api_router)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -304,6 +321,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+@app.on_event("startup")
+async def startup_db_client():
+    """Test MongoDB connection on startup"""
+    try:
+        # Test connection
+        await client.admin.command('ping')
+        logger.info("✅ Successfully connected to MongoDB!")
+    except Exception as e:
+        logger.error(f"❌ Failed to connect to MongoDB: {e}")
+        logger.warning("⚠️  App will continue but database operations will fail")
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+    logger.info("Closed MongoDB connection")
